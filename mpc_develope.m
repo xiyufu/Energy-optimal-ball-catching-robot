@@ -1,49 +1,22 @@
 % TODO:
 % The maximum torque in manual is not enough for gravity compensation...
 
-% Strange, the calcuation doesn't give the 4th joint enough torque (for
-% acceleration) and it will fall back. The estimation of si is influenced
-% by the 4th joint and goes back (si_old > si_new, because the 4th joint
-% is going back) Maybe I should check the Jacobian at this point? A
-% singular pose?
 import casadi.*
 
-NMAX = 500;
-N0 = 20;
+NMAX = 100;
+N0 = 10;
 
 fs = 250;
 Ts = 1/fs;
 % The interception is hard coded here.
-q_itc = (pi/3)*ones(6,1);
+q_itc = pi/6*ones(6,1);
 T_itc = 2;
 tau_max = 50;
 % [0.633104; 0.552033; 0.324992; 0.146561; 0.128488; 0.200659]; % Nm, from gear side
 
 %% System dynamics
-[f_m, f_c, f_g, f_fv, f_fc, solver] = dyn_init();
-
-% % Forward kinematics
-% fkine = @ (q) [0.3*cos(q(1))+0.3*cos(q(1)+q(2)), 0.3*sin(q(1))+0.3*sin(q(1)+q(2))];
-% 
-% %****************** M(q), C(q,dq), G(q)********************
-% M = @(x) [4.1575+0.09*cos(x(2)), 1.0225+0.045*cos(x(2));
-%     1.0225+0.045*cos(x(2)), 1.0225];
-% 
-% C = @(x, dx) [0.1, -0.045*(dx(2) + 2*dx(1))*sin(x(2));
-%     0.045*dx(1)*sin(x(2)), 0.1];
-% 
-% G = @(x) [5.886*cos(x(1))+1.4715*cos(x(1)+x(2));
-%     1.4715*cos(x(1)+x(2))];
-% 
-% Mi = @(x) pinv(M(x));
-% 
-% % x_dot = f(x,u)
-% zero22 = zeros(2,2);
-% zero21 = zeros(2,1);
-% eye22 = eye(2,2);
-% 
-% f = @(x, u) [zero22, eye22;
-%     zero22, -Mi(x(1:2))*C(x(1:2),x(3:4))]*x + [zero22; Mi(x(1:2))]*u + [zero21; -Mi(x(1:2))*G(x(1:2))];
+[f_m, f_c, f_g, f_fv, f_fc, solver] = dyn_init(Ts);
+Sign = @(x) 2/(1+exp(-2000*x))-1;
 
 %% Initializing
 x = zeros(12,NMAX+1); % actual states of the robot
@@ -70,9 +43,13 @@ flag_Nchange = 0;
 
 %Test variables
 imprecise_counter = -1;
-ei = zeros(2,NMAX);
+ei = zeros(6,NMAX);
 si_int = 0;
-
+s_sequence = zeros(1, NMAX);
+mcg_tracker = zeros(18, NMAX);
+u_tracker = zeros(6, NMAX);
+a_tracker = zeros(1, NMAX);
+b_tracker = zeros(1, NMAX);
 %% Fomulating optimization problems
 % Define a path
 N = N0;
@@ -145,27 +122,34 @@ opti.subject_to(T <= T_remain);
 opti.solver('ipopt');
 
 %% Optimization problem to find si
+q_now = zeros(6,1);
+c1= dq_pre + 2*q_now - 2*q_itc;
+c2 = 3*q_itc - 3*q_now - 2*dq_pre;
+c3 = dq_pre;
+c4 = q_now;
+qs = @(s) c1*s.^3 + c2*s.^2 + c3*s + c4;
+dqs = @(s) 3*c1*s.^2 + 2*c2*s + c3;
+ddqs = @(s) 6*c1*s + 2*c2;
+
 optis = casadi.Opti();
 q_meas = optis.parameter(6,1);
-spre = optis.parameter(1,1);
-snext = optis.parameter(1,1);
-q_spre = optis.parameter(6,1);
-q_snext = optis.parameter(6,1);
-si_mid = optis.parameter(1,1);
-q_smid = optis.parameter(6,1);
-
+si_old = optis.parameter(1,1);
 si_new = optis.variable(1,1);
-qsi_new = (q_snext-q_spre)*(si_new-si_mid)/(snext-spre) + q_smid;
-
-e_s = (qsi_new-q_meas)'*(qsi_new-q_meas);
+e_s = (qs(si_new)-q_meas)'*(qs(si_new)-q_meas);
 optis.minimize(e_s);
-optis.subject_to(si_new <= snext);
-optis.subject_to(si_new >= spre);
+optis.subject_to(si_new <= si_old+0.1);
+optis.subject_to(si_new >= si_old-0.1);
 optis.solver('ipopt');
 
 
 
 %% Start running
+qh = zeros(6, N0);
+dqh = zeros(6, N0);
+ddqh = zeros(6, N0);
+temp_m = zeros(6, 6);
+temp_c = zeros(6, 6);
+temp_g = zeros(6, 1);
 while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     
     if counter > NMAX
@@ -184,19 +168,17 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
         si = 0;
         q_now = x(1:6,k);
         
-        qs = zeros(6, nr+1);
-        dqs = zeros(6, nr+1);
-        ddqs = zeros(6, nr+1);
-        for traj_iter = 1:6
-            [qs(traj_iter, :), dqs(traj_iter, :), ddqs(traj_iter, :), ~, ~] = polytraj(q_itc(traj_iter), nr, q_now(traj_iter), dq_pre(traj_iter), ddq_pre(traj_iter), 0);
-        end
-%         [q1s, dq1s, ddq1s, ~, ~] = polytraj(q_itc(1), nr, q_now(1), dq_pre(1), ddq_pre(1), 0);
-%         [q2s, dq2s, ddq2s, ~, ~] = polytraj(q_itc(2), nr, q_now(2), dq_pre(2), ddq_pre(2), 0);
-%         [q3s, dq3s, ddq3s, ~, ~] = polytraj(q_itc(3), nr, q_now(3), dq_pre(3), ddq_pre(3), 0);
-%         [q4s, dq4s, ddq4s, ~, ~] = polytraj(q_itc(4), nr, q_now(4), dq_pre(4), ddq_pre(4), 0);
-%         [q5s, dq5s, ddq5s, ~, ~] = polytraj(q_itc(5), nr, q_now(5), dq_pre(5), ddq_pre(5), 0);
-%         [q6s, dq6s, ddq6s, ~, ~] = polytraj(q_itc(6), nr, q_now(6), dq_pre(6), ddq_pre(6), 0);
+        c1= dq_pre + 2*q_now - 2*q_itc;
+        c2 = 3*q_itc - 3*q_now - 2*dq_pre;
+        c3 = dq_pre;
+        c4 = q_now;
         
+        qs = @(s) c1*s.^3 + c2*s.^2 + c3*s + c4;
+        dqs = @(s) 3*c1*s.^2 + 2*c2*s + c3;
+        ddqs = @(s) 6*c1*s + 2*c2;
+%         for traj_iter = 1:6
+%             [qs(traj_iter, :), dqs(traj_iter, :), ddqs(traj_iter, :), ~, ~] = polytraj(q_itc(traj_iter), nr, q_now(traj_iter), dq_pre(traj_iter), ddq_pre(traj_iter), 0);
+%         end      
         flag_init = 0;
         flag_precise = 1;
         imprecise_counter = imprecise_counter + 1;
@@ -207,37 +189,18 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     
     ds_k = s(2:end) - s(1:end-1);
     sh = s(1:end-1) + 0.5*ds_k;
-    sh_int = sh*nr;
-    % Find q(sh) by interpolation
-    sh_low = floor(sh_int)+1;
-    sh_high = ceil(sh_int)+1;
-    
-    % sh_high - sh_low == 1, so we can remove the denominator
-    qh = zeros(6, N0);
-    dqh = zeros(6, N0);
-    ddqh = zeros(6, N0);
-    for mid_iter = 1:6
-        qh(mid_iter, :) = (qs(mid_iter, sh_high)-qs(mid_iter, sh_low)).*(sh_int-sh_low)+qs(mid_iter, sh_low);
-        dqh(mid_iter, :) = (dqs(mid_iter, sh_high)-dqs(mid_iter, sh_low)).*(sh_int-sh_low)+dqs(mid_iter, sh_low);
-        ddqh(mid_iter, :) = (ddqs(mid_iter, sh_high)-ddqs(mid_iter, sh_low)).*(sh_int-sh_low)+ddqs(mid_iter, sh_low);
-    end
-%     qh1 = (q1s(sh_high)-q1s(sh_low)).*(sh_int-sh_low)+q1s(sh_low);
-%     qh2 = (q2s(sh_high)-q2s(sh_low)).*(sh_int-sh_low)+q2s(sh_low);
-%     dqh1 = (dq1s(sh_high)-dq1s(sh_low)).*(sh_int-sh_low)+dq1s(sh_low);
-%     dqh2 = (dq2s(sh_high)-dq2s(sh_low)).*(sh_int-sh_low)+dq2s(sh_low);
-%     ddqh1 = (ddq1s(sh_high)-ddq1s(sh_low)).*(sh_int-sh_low)+ddq1s(sh_low);
-%     ddqh2 = (ddq2s(sh_high)-ddq2s(sh_low)).*(sh_int-sh_low)+ddq2s(sh_low);
-% 
-%     qh = [qh1;qh2];
-%     dq = [dqh1;dqh2];
-%     ddq = [ddqh1;ddqh2];
-    
-    %*******************m, c, g*********************
-    % memory allocation
-    temp_m = zeros(6, 6);
-    temp_c = zeros(6, 6);
-    temp_g = zeros(6, 1);
-    
+%     sh_scaled = sh*nr;
+%     % Find q(sh) by interpolation
+%     sh_low = floor(sh_scaled);
+%     sh_high = ceil(sh_scaled);
+%     % sh_high - sh_low == 1 (because nr = 999, si_scaled~=int), so we can remove the denominator
+%     qh = (qs(:, sh_high)-qs(:, sh_low)).*(sh_scaled-sh_low)+qs(:, sh_low);
+%     dqh = (dqs(:, sh_high)-dqs(:, sh_low)).*(sh_scaled-sh_low)+dqs(:, sh_low);
+%     ddqh = (ddqs(:, sh_high)-ddqs(:, sh_low)).*(sh_scaled-sh_low)+ddqs(:, sh_low);
+    qh = qs(sh);
+    dqh = dqs(sh);
+    ddqh = ddqs(sh);
+    %*******************m, c, g********************    
     m_k = zeros(size(qh));
     c_k = zeros(size(qh));
     g_k = zeros(size(qh));
@@ -258,16 +221,6 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
         gcp(1, N:end) = 0;
     end
     
-%     % % tset
-%     
-%     if k < 6
-%         mcg_tracker(:, k) = [m_k(:,1);c_k(:,1);g_k(:,1)];
-%         qh_tracker(:,k) = qh(:, 1);
-%         dq_tracker(:, k) = dq(:, 1);
-%     else
-%         k;
-%     end
-%     % %
     opti.set_value(grid_control, gcp);
     opti.set_value(m, m_k);
     opti.set_value(c, c_k);
@@ -275,8 +228,6 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     opti.set_value(b_init, b_init_k);
     opti.set_value(T_remain, T_itc);
     opti.set_value(ds, ds_k);
-%     opti.set_value(a_warm, a_opt);
-%     opti.set_value(b_warm, b_opt);
     
     % solve NLP
     sol = opti.solve();   % actual solve
@@ -288,12 +239,11 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     bk_inv_opt = sol.value(bk_inv);
     b_opt = sol.value(b);
     a_opt = sol.value(a);
-    
     dt = ds_k.*bk_inv_opt;
-    
+    q_ref_k= qs(si+ds_k(1));
     
     %% update
-    number_of_execution = floor(dt(1)/Ts);
+    number_of_execution = round(dt(1)/Ts);
     
     if dt(1) < Ts
         number_of_execution = 1;
@@ -313,83 +263,89 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     for i = 1:number_of_execution
         % q, dq, ddq
         q_inter = x_inter(1:6,i);
-        
+        dq_inter = dqs(si);
+        ddq_inter = ddqs(si);
         b_inter = ( (b_opt(2) - b_opt(1))/ds_k(1) )*( si - s(1) ) + b_opt(1);% b is piecewise linear
-        % linear interpolation
-        si_scaled = si*nr;
-        si_low = floor(si_scaled) + 1;
-        si_high = ceil(si_scaled) + 1;
-        si_scaled = si_scaled + 1;
-        if si_low == si_high
-            dq_inter = dqs(:, si_low);
-            ddq_inter = ddqs(:, si_low);
-        else
-            dq_inter = (dqs(:, si_high)-dqs(:, si_low))*(si_scaled-si_low)/(si_high-si_low)+dqs(:, si_low);
-%            dq_inter2 = (dq2s(si_high)-dq2s(si_low))*(si_scaled-si_low)/(si_high-si_low)+dq2s(si_low);
-            ddq_inter = (ddqs(:, si_high)-ddqs(:, si_low))*(si_scaled-si_low)/(si_high-si_low)+ddqs(:, si_low);
-%             ddq_inter2 = (ddq2s(si_high)-ddq2s(si_low))*(si_scaled-si_low)/(si_high-si_low)+ddq2s(si_low);
-%             dq_inter = [dq_inter1;dq_inter2];
-%             ddq_inter = [ddq_inter1;ddq_inter2];
-        end
+        %         % linear interpolation of q(s), dq(s) and ddq(s)
+        %         si_scaled = si*nr;
+        %         si_low = floor(si_scaled) + 1;
+        %         si_high = ceil(si_scaled) + 1;
+        %         si_scaled = si_scaled + 1;
+        %         if si_low == si_high % si_scaled is an integer
+        % %             q_inter = dqs(:, si_low);
+        %             dq_inter = dqs(:, si_low);
+        %             ddq_inter = ddqs(:, si_low);
+        %         else
+        % %             q_inter = (qs(:, si_high)-qs(:, si_low))*(si_scaled-si_low)/(si_high-si_low)+qs(:, si_low);
+        %             dq_inter = (dqs(:, si_high)-dqs(:, si_low))*(si_scaled-si_low)/(si_high-si_low)+dqs(:, si_low);
+        %             ddq_inter = (ddqs(:, si_high)-ddqs(:, si_low))*(si_scaled-si_low)/(si_high-si_low)+ddqs(:, si_low);
+        %         end
         % m c g
         temp_m = full( f_m(q_inter) );
         temp_c = full( f_c(q_inter, dq_inter) );
         temp_g = full( f_g(q_inter, [0;0;0;0;0;0], [0;0;0;0;0;0]) );
         m_inter = temp_m*dq_inter;
         c_inter = temp_m*ddq_inter + temp_c*dq_inter;
-        g_inter = temp_g;
+        g_inter = temp_g + f_fc*sign(dq_inter);
         % get tau
         u = m_inter*a_opt(1) + c_inter*b_inter + g_inter;
-        
+        % Integrate
         out = solver('x0',x_inter(:, i),'p',u);
         x_inter(:, i+1) = full( out.xf );
-%         k1 = f(x_inter(:, i), u);
-%         k2 = f(x_inter(:,i)+Ts*k1/2, u);
-%         k3 = f(x_inter(:,i)+Ts*k2/2, u);
-%         k4 = f(x_inter(:,i)+Ts*k3,   u);
-%         x_inter(:,i+1) = x_inter(:,i) + Ts*(k1+2*k2+2*k3+k4)/6;
         
         % update si
-        % First step, search si in [si_low-50, si_low+50], get the index (a
-        % integer) that is closest to si. It's called si_int
-        search_low = max(1, si_low-100);
-        search_high = min(nr+1, si_low+100);
-        e_inter = x_inter(1:6, i+1) - qs(:, search_low:search_high);
-        e_inter_sq = zeros(1,length(e_inter));
-        for e_inter_i = 1:length(e_inter)
-            e_inter_sq(e_inter_i) = e_inter(:,e_inter_i)'*e_inter(:,e_inter_i);
-        end
-        si_int_test = si_int;
-        [~, si_int] = min(e_inter_sq);
-        si_int = si_int + search_low - 1;
-        
-        if si_int_test > si_int
-            warning('si reversed');
-        end
-        % Second step, linearize q(s) around si_int ([si_int-1, si_int+1])
-        % q(si) = (q(si_int+1)-q(si_int-1))/2 * (si - si_int) + q(si_int)
-        % Solve min{|q(si)-q_now|^2}, s.t. si_int-1<si<si_int+1
-        si_int_low = max(1,si_int-1);
-        si_int_high = min(nr+1, si_int+1);
-        optis.set_value(spre, si_int_low);
-        optis.set_value(snext, si_int_high);
+        %         % First step, search si in [si_low-50, si_low+50], get the index (a
+        %         % integer) that is closest to si. It's called si_int
+        %         search_low = max(1, si_low-20);
+        %         search_high = min(nr+1, si_low+20);
+        %         e_inter = x_inter(1:6, i+1) - qs(:, search_low:search_high);
+        %         e_inter_sq = zeros(1,length(e_inter));
+        %         for e_inter_i = 1:length(e_inter)
+        %             e_inter_sq(e_inter_i) = e_inter(:,e_inter_i)'*e_inter(:,e_inter_i);
+        %         end
+        %         si_int_test = si_int;
+        %         [~, si_int] = min(e_inter_sq);
+        %         si_int = si_int + search_low - 1;
+        %
+        %         % test
+        %         mcg_tracker(:, k) = [m_inter;c_inter;g_inter];
+        %         a_tracker(k) = a_opt(1);
+        %         b_tracker(k) = b_opt(1);
+        %         if i == 1
+        %             u_tracker(:, k) = u;
+        %         end
+        %         if si_int_test > si_int
+        %             warning('si reversed');
+        %         end
+        %         % end test %
+        %
+        %         % Second step, linearize q(s) around si_int ([si_int-1, si_int+1])
+        %         % q(si) = (q(si_int+1)-q(si_int-1))/2 * (si - si_int) + q(si_int)
+        %         % Solve min{|q(si)-q_now|^2}, s.t. si_int-1<si<si_int+1
+        %         si_int_low = max(1,si_int-1);
+        %         si_int_high = min(nr+1, si_int+1);
+        %         optis.set_value(spre, si_int_low);
+        %         optis.set_value(snext, si_int_high);
+        %         optis.set_value(q_meas, x_inter(1:6, i+1));
+        %         optis.set_value(q_spre, qs(:, si_int_low));
+        %         optis.set_value(q_snext, qs(:, si_int_high));
+        %         optis.set_value(si_mid, si_int);
+        %         optis.set_value(q_smid, qs(:, si_int));
+        %
+        %         sols = optis.solve();
+        %
+        %         si = sols.value(si_new);
+        %         si = (si-1)/nr;
+        optis.set_value(si_old, si);
         optis.set_value(q_meas, x_inter(1:6, i+1));
-        optis.set_value(q_spre, qs(:, si_int_low));
-        optis.set_value(q_snext, qs(:, si_int_high));
-        optis.set_value(si_mid, si_int);
-        optis.set_value(q_smid, qs(:, si_int));
+        sol_s = optis.solve();
+        si = sol_s.value(si_new);
         
-        sols = optis.solve();
-        
-        si = sols.value(si_new);
-        si = (si-1)/nr;
-
     end
     
     x(:,k+1) = x_inter(:,end);
     
     % Let's disable the precision check for now
-    q_ref_k= (qs(:, si_int_high)-qs(:, si_int_low))*(si*nr+1-si_int)/(si_int_high-si_int_low) + qs(:, si_int);
     q_now = x(1:6,k+1);
 %     if q_ref_k(1) > 1/k || q_ref_k(2) > 1/k
 %         flag_precise = 0;
@@ -398,9 +354,7 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     b_init_k = (b_opt(2) - b_opt(1))/ds_k(1)*(si - s(1)) + b_opt(1);
     dq_pre_k = x(7:12,k+1)/sqrt(b_init_k);
     dq_pre = dq_pre_k;
-%     ddq_pre1 = (ddq1s(si_int_high)-ddq1s(si_int_low))*(si*nr+1-si_int)/(si_int_high-si_int_low)+ddq1s(si_int);
-%     ddq_pre2 = (ddq2s(si_int_high)-ddq2s(si_int_low))*(si*nr+1-si_int)/(si_int_high-si_int_low)+ddq2s(si_int);
-    ddq_pre = (ddqs(:, si_int_high)-ddqs(:, si_int_low))*(si*nr+1-si_int)/(si_int_high-si_int_low)+ddqs(:, si_int);
+%     ddq_pre = (ddqs(:, si_int_high)-ddqs(:, si_int_low))*(si*nr+1-si_int)/(si_int_high-si_int_low)+ddqs(:, si_int);
     
     t(k+1) = t(k) + number_of_execution*Ts;
     T_itc = T_itc - number_of_execution*Ts;
@@ -410,24 +364,12 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     end
     
     q_ref(:,k+1) = q_ref_k;
-%     ei(:, k) = q_ref(:, k) - x(1:6, k);
+    ei(:, k) = q_ref(:, k) - x(1:6, k);
     k=k+1;
+    
+    if si >= 1-1/nr
+        break
+    end
 end
 
-figure; hold
-sc1 = scatter(t(1:k), x(1,1:k));
-sc1.Marker = 'x';
-sc2 = scatter(t(1:k), x(2,1:k));
-sc2.Marker = 'x';
-sc3 = scatter(t(1:k), x(3,1:k));
-sc3.Marker = 'x';
-sc4 = scatter(t(1:k), x(4,1:k));
-sc4.Marker = 'x';
-sc5 = scatter(t(1:k), x(5,1:k));
-sc5.Marker = 'x';
-sc6 = scatter(t(1:k), x(6,1:k));
-sc6.Marker = 'x';
-
-plot(t(1:k), q_ref(:,1:k));
-plot(t(1:k), q_itc(1)*ones(1,k),t(1:k), q_itc(2)*ones(1,k));
-
+arm_plot;

@@ -7,7 +7,8 @@ function [f_m, f_c, f_g, f_fv, f_fc, solver] = dyn_pid_init(Ts)
 % solver() is a casadi.integrator() for robot simulation
 import casadi.*
 
-Sign = @(x) 2/(1+exp(-2000*x))-1;% smooth approximation of sign(X)
+% Sign = @(x) 2/(1+exp(-2000*x))-1;% smooth approximation of sign(X)
+Sign = @(x) 0*x;
 
 % Base parameters from identification experiments
 fv_index = [2,11,21,31,41,51];
@@ -50,9 +51,10 @@ f_c = casadi.Function('C', {q, qd}, {C});
 f_g = casadi.Function('G', {q, qd, qdd}, {G});
 
 % PID parameters and model
+% [121 121 101 50 51 50] : Transmission ratio between motors and joints
 Kp = [10; 10; 10; 10; 10; 10];
-Ki = [1; 1; 0.3; 0.1; 0.1; 0.1];
-Kv = [0.1; 0.1; 0.03; 0.01; 0.01; 0.01];
+Ki = [1*121^2; 1*121^2; 0.3*101^2; 0.1*50^2; 0.1*51^2; 0.1*50^2];
+Kv = [0.1*121^2; 0.1*121^2; 0.03*101^2; 0.01*50^2; 0.01*51^2; 0.01*50^2];
 pid_e1 = qref - q;
 pid_e2 = Kp.*pid_e1 + qdref - qd;
 pid_u = nu + Kv.*pid_e2 + tau;
@@ -73,5 +75,10 @@ dae.ode = rhs;
 dae.alg = fz;
 opts.tf = Ts;
 solver = integrator('integrator','idas',dae,opts);
+% This DAE has the following form:
+% ODE: d([q;qd;nu])/dt = [qd;qdd;Ki*pid_e2]
+% AE: 0 = pid_u - phi(q, qd, qdd)*Theta
+% It's written like this because casadi don't know dq/dt = qd, d(qd)/dt =
+% qdd, etc. We have to write this relationship explictly.
 end
 

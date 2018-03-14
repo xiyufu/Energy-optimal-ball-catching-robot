@@ -1,5 +1,7 @@
 % TODO:
 % The maximum torque in manual is not enough for gravity compensation...
+% Something wrong with the DAE solver, just like in test.m. Need to check
+% the jacobian
 
 import casadi.*
 
@@ -22,10 +24,11 @@ Sign = @(x) 2/(1+exp(-2000*x))-1;
 x = zeros(12,NMAX+1); % actual states of the robot
 u_act = zeros(6,NMAX); % control histroy
 t = zeros(1,NMAX+1); % time
-b_init_k = 0.001;
+b_init_k = 1e-6;
 dq_pre = 0.001*ones(6, 1); % dq/ds after previous execution
 ddq_pre = 0.001*ones(6, 1); % dq^2/d^2s after previous execution
 q_ref = zeros(6,NMAX+1);
+dq_ref = zeros(6, NMAX+1);
 a_opt = ones(1, N0);
 b_opt = ones(1, N0+1);
 err_init = abs(x(1:6,1) - q_itc);
@@ -63,8 +66,8 @@ tau = opti.variable(6,N0);
 %objective function
 %   % reshape a and b for tau calculation
 b_temp = (b(1:end-1)+b(2:end))/2;
-bb = [b_temp;b_temp;b_temp;b_temp;b_temp;b_temp];
-aa = [a;a;a;a;a;a];
+aa = ones(6,1)*a;
+bb = ones(6,1)*b_temp;
 
 %   % m, c, g are calculated inside the while loop
 m = opti.parameter(6, N0);
@@ -85,14 +88,17 @@ E = ds*(bk_inv.*tau_sum)'; % Thermal energy
 %   % set objective function
 opti.minimize(E);
 
-opti.subject_to(tau == m.*aa + c.*bb + g); % joint torque & path info
+% joint torque & path info
+% See 'Time-Optimal Control of Robotic Manipulators Along Specified Paths'
+% for a clear explanation
+opti.subject_to(tau == m.*aa + c.*bb + g); 
 % dynamic constraints -
 for kk=1:N0
     opti.subject_to(b(kk+1)-b(kk)-2*a(kk)*ds(kk)==0);
 end
 
 % why should we impose torque constraint on all of them? We only apply the
-% first one?
+% first one? 
 % If we don't limit all the torques and if the path will be regenerated,
 % we'll have some wild path that is ok in the first step. But if the path
 % is regenerated again and again (which is very likely to happen), we will
@@ -132,7 +138,7 @@ optis = casadi.Opti();
 q_meas = optis.parameter(6,1);
 si_old = optis.parameter(1,1);
 si_new = optis.variable(1,1);
-e_s = (qs(si_new)-q_meas)'*(qs(si_new)-q_meas);
+e_s = (qs(si_new) - q_meas)'*(qs(si_new) - q_meas);
 optis.minimize(e_s);
 optis.subject_to(si_new <= si_old+0.1);
 optis.subject_to(si_new >= si_old-0.1);
@@ -227,6 +233,7 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     a_opt = sol.value(a);
     dt = ds_k.*bk_inv_opt;
     q_ref_k= qs(si+ds_k(1));
+    dq_ref_k = dqs(si+ds_k(1))*sqrt(b_opt(2));
     
     %% update
     number_of_execution = round(dt(1)/Ts);
@@ -251,8 +258,9 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
         b_inter = slope_b*( si - s(1) ) + b_opt(1);% b is piecewise linear
         % reference
         ds_inter = Ts*Ts*slope_b/4 + Ts*sqrt(b_inter);
+        b_inter_next = slope_b*ds_inter + b_inter;
         q_ref_inter = qs(si+ds_inter);
-        dq_ref_inter = qs(si+ds_inter);
+        dq_ref_inter = dqs(si+ds_inter)*sqrt(b_inter_next);
         % m c g
         temp_m = full( f_m(q_inter) );
         temp_c = full( f_c(q_inter, dq_inter) );
@@ -263,6 +271,9 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
         % get tau
         u = m_inter*a_opt(1) + c_inter*b_inter + g_inter;
         % Integrate
+%         
+%         dq_ref_inter = zeros(6,1);
+%         
         out = solver('x0',[x_inter(:, i);nu],'p',[u;q_ref_inter;dq_ref_inter]);          
         temp_state = full(out.xf);
         x_inter(:, i+1) = temp_state(1:12);
@@ -275,8 +286,6 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
         
     end
     
-    q_ref(:,k+1) = q_ref_k;
-    
     if flag_integratorF == 1
         for ii = 1:i-1
             x(:,k+ii) = x_inter(:, ii+1);
@@ -285,12 +294,6 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
         break
     end
     x(:,k+1) = x_inter(:,end);
-    
-    % Let's disable the precision check for now
-    q_now = x(1:6,k+1);
-%     if q_ref_k(1) > 1/k || q_ref_k(2) > 1/k
-%         flag_precise = 0;
-%     end
     
     b_init_k = (b_opt(2) - b_opt(1))/ds_k(1)*(si - s(1)) + b_opt(1);
     dq_pre_k = x(7:12,k+1)/sqrt(b_init_k);
@@ -302,13 +305,21 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
         warning('time out');
         break
     end
+    q_ref(:,k+1) = q_ref_k;
+    dq_ref(:, k+1) = dq_ref_k;
     
     ei(:, k) = q_ref(:, k) - x(1:6, k);
-    k=k+1;
-    
+    % Let's disable the precision check for now
+    q_now = x(1:6,k+1);
+    %     if q_ref_k(1) > 1/k || q_ref_k(2) > 1/k
+    %         flag_precise = 0;
+    %     end
+
     if si >= 1-1/nr
         break
     end
+    
+    k = k + 1;
 end
 
 arm_plot;

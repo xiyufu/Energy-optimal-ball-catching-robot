@@ -1,6 +1,15 @@
-function [jac_out] = jac(q)
+function [jac_out] = jacobian(q)
+import casadi.*
 
-jac_out = zeros(36, 1);
+if isa(q,'casadi.SX')
+    jac_out = SX.zeros(36,1);
+elseif isa(q,'casadi.MX')
+    jac_out = MX.zeros(36,1);
+elseif isa(q,'casadi.DM')
+    jac_out = DM.zeros(36,1);
+else
+    jac_out = zeros(36, 1);
+end
 
 x0 = sin(q(3));
 x1 = sin(q(1));
@@ -100,3 +109,8 @@ jac_out(33) = 0;
 jac_out(34) = x27;
 jac_out(35) = x42;
 jac_out(36) = x46;
+
+jac_out = reshape(jac_out, 6,6);
+
+end
+

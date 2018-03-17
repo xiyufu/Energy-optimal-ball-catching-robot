@@ -26,9 +26,15 @@ for i = 1:length(pos)-1
     nu(:, i+1) = temp_state(13:end);
 end
 
-% We encountered a 'IDA_TOO_MUCH_WORK' at the middle of our path. According
+% If the Sign function is set to 0,
+% We will encounter a 'IDA_TOO_MUCH_WORK' at the middle of our path. According
 % to the document, it means we have a 'singular point'. What is a singular
 % ponit? The one at which the Jacobian of the robot is singular?
+% If the Sign function is set to 2/(1+exp(-2000*x))-1,
+% We get 'IDA_CONV_FAIL'. Casadi says that 'Calculating Jacobian failed'.
+
+%This is true for mpc_develope_pid.m too. So the mpc itself might be ok.
+%This problem lies in the path?
 
 figure; hold
 for i = 1:6

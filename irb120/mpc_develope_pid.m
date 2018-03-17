@@ -6,7 +6,7 @@
 import casadi.*
 
 NMAX = 100;
-N0 = 10;
+N0 = 20;
 
 fs = 250;
 Ts = 1/fs;
@@ -49,6 +49,7 @@ imprecise_counter = -1;
 ei = zeros(6,NMAX);
 si_int = 0;
 flag_integratorF = 0;
+s_sequence = zeros(1, NMAX);
 
 %% Fomulating optimization problems
 % Define a path
@@ -153,6 +154,7 @@ ddqh = zeros(6, N0);
 temp_m = zeros(6, 6);
 temp_c = zeros(6, 6);
 temp_g = zeros(6, 1);
+% nu = zeros(6,1);
 while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     
     if counter > NMAX
@@ -186,6 +188,11 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
         % keep tracking the same path
         s = linspace(si, 1, N0+1);
     end
+    
+    % %test
+    s_sequence(k) = si;
+    
+    % %end test
     
     ds_k = s(2:end) - s(1:end-1);
     sh = s(1:end-1) + 0.5*ds_k;

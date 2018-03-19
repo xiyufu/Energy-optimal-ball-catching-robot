@@ -1,4 +1,4 @@
-function [f_m, f_c, f_g, f_fv, f_fc, solver] = dyn_pid_init(Ts)
+function [f_m, f_c, f_g, f_fv, f_fc, solver, Sign] = dyn_pid_init(Ts)
 %[f_m, f_c, f_g, f_fv, f_fc, solver] = dyn_init()
 % This function returns the dynamic model of irb120
 % tau = f_m*ddq + f_c*dq + f_g + f_fv*dq + f_fc*sign(dq)
@@ -7,8 +7,8 @@ function [f_m, f_c, f_g, f_fv, f_fc, solver] = dyn_pid_init(Ts)
 % solver() is a casadi.integrator() for robot simulation
 import casadi.*
 
-% Sign = @(x) 2/(1+exp(-2000*x))-1;% smooth approximation of sign(X)
-Sign = @(x) 0*x;
+Sign = @(x) 2/(1+exp(-2000*x))-1;% smooth approximation of sign(X)
+% Sign = @(x) 0*x;
 
 % Base parameters from identification experiments
 fv_index = [2,11,21,31,41,51];

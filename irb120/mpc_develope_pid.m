@@ -11,14 +11,14 @@ N0 = 10;
 fs = 250;
 Ts = 1/fs;
 % The interception is hard coded here.
-q_itc = pi/6*ones(6,1);
+% q_itc = pi/6*ones(6,1); % 'Singular point' before reaching this point
+q_itc = pi/10*ones(6,1); % No 'Singular point'
 T_itc = 2;
 tau_max = 50;
 % [0.633104; 0.552033; 0.324992; 0.146561; 0.128488; 0.200659]; % Nm, from gear side
 
 %% System dynamics
-[f_m, f_c, f_g, f_fv, f_fc, solver] = dyn_pid_init(Ts);
-Sign = @(x) 2/(1+exp(-2000*x))-1;
+[f_m, f_c, f_g, f_fv, f_fc, solver, Sign] = dyn_pid_init(Ts);
 
 %% Initializing
 x = zeros(12,NMAX+1); % actual states of the robot

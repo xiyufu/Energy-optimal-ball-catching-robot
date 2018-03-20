@@ -1,4 +1,4 @@
-function [f_m, f_c, f_g, f_fv, f_fc, solver] = dyn_pid_init(Ts)
+function [f_m, f_c, f_g, f_fv, f_fc, solver, Sign] = dyn_pid_init(Ts)
 %[f_m, f_c, f_g, f_fv, f_fc, solver] = dyn_init()
 % This function returns the dynamic model of irb120
 % tau = f_m*ddq + f_c*dq + f_g + f_fv*dq + f_fc*sign(dq)

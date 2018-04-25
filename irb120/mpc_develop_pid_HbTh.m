@@ -1,7 +1,6 @@
-% TODO:
-% The maximum torque in manual is not enough for gravity compensation...
-% Something wrong with the DAE solver, just like in test.m. Need to check
-% the jacobian
+% This is worse than mcg approach. The invalid point is still there and
+% other results are not good either. Even new singular points appears
+% E.g. pi/20*ones(6,1)
 
 import casadi.*
 
@@ -11,18 +10,23 @@ N0 = 10;
 fs = 250;
 Ts = 1/fs;
 % The interception is hard coded here.
-q_itc = pi/6*ones(6,1);
+q_itc = pi/10*ones(6,1);
 T_itc = 2;
-tau_max = 50;
-% [0.633104; 0.552033; 0.324992; 0.146561; 0.128488; 0.200659]; % Nm, from gear side
-
+% Max gear torque
+tg_max = [0.633; 0.552; 0.325; 0.146; 0.128; 0.201];
+% transmission ratio
+trans_ratio = [121; 121; 101; 50; 51; 50];
+% Max joint torque
+tau_max = tg_max.*trans_ratio;
 %% System dynamics
-Sign = @(x) sign(x);
-% Sign = @(x) 2/(1+exp(-2000*x))-1;% smooth approximation of sign(X)
-fv_index = [2,11,21,31,41,51];
-fc_index = fv_index + 1;
-Theta = [0.8257, 14.5172, 12.9110, 0.4266, -0.0352, -0.0799, 0.2086, 0.6680, 2.2940, -0.0468, 17.7907, 9.9381, 0.2132, -0.0368, -0.0574, 0.2467, -0.0206, 0.4034, 1.0592, 0.2941, 6.7992, 5.2652, 0.1004, 0.0258, 0.0355, -0.0385, 0.0124, 0.0038, 0.0759, 0.0639, 0.7472, 1.0598, -0.1588, 0.0376, -0.0080, 0.1119, 0.0046, 0.0296, 0.0157, 0.0206, 1.2398, 1.5322, -0.0015, -0.0629, 0.0138, -0.0171, 0.0123, 0.0004, -0.0350, 0.0255, 0.5774, 1.2584].';
-Theta(fv_index) = 0;
+% Sign = @(x) sign(x);
+% % Sign = @(x) 2/(1+exp(-2000*x))-1;% smooth approximation of sign(X)
+% fv_index = [2,11,21,31,41,51];
+% fc_index = fv_index + 1;
+% Theta = [0.8257, 14.5172, 12.9110, 0.4266, -0.0352, -0.0799, 0.2086, 0.6680, 2.2940, -0.0468, 17.7907, 9.9381, 0.2132, -0.0368, -0.0574, 0.2467, -0.0206, 0.4034, 1.0592, 0.2941, 6.7992, 5.2652, 0.1004, 0.0258, 0.0355, -0.0385, 0.0124, 0.0038, 0.0759, 0.0639, 0.7472, 1.0598, -0.1588, 0.0376, -0.0080, 0.1119, 0.0046, 0.0296, 0.0157, 0.0206, 1.2398, 1.5322, -0.0015, -0.0629, 0.0138, -0.0171, 0.0123, 0.0004, -0.0350, 0.0255, 0.5774, 1.2584].';
+% Theta(fv_index) = 0;
+
+[solver, Sign, f_hbth] = dyn_HbTh_init(Ts);
 
 %% Initializing
 x = zeros(12,NMAX+1); % actual states of the robot
@@ -35,6 +39,7 @@ q_ref = zeros(6,NMAX+1);
 dq_ref = zeros(6, NMAX+1);
 a_opt = ones(1, N0);
 b_opt = ones(1, N0+1);
+tau_opt = zeros(6, N0);
 err_init = abs(x(1:6,1) - q_itc);
 err = zeros(1,NMAX);
 % nr should be an odd number so that ceil(s) and floor(s) won't give the
@@ -73,7 +78,7 @@ b_temp = (b(1:end-1)+b(2:end))/2;
 aa = ones(6,1)*a;
 bb = ones(6,1)*b_temp;
 
-%   % m, c, g are calculated inside the while loop
+% read path info q(s), dq/ds, ddq/dss
 q_op = opti.parameter(6, N0);
 dq_op = opti.parameter(6, N0);
 ddq_op = opti.parameter(6, N0);
@@ -81,8 +86,9 @@ ddq_op = opti.parameter(6, N0);
 bk = ( (b(2:end)).^0.5 + (b(1:end-1)).^0.5 )/2 ;
 bk_inv = 1./bk; % Numerical approximation of 1/sqrt(b)
 
-tau_sq = tau.^2;
-tau_sum = sum(tau_sq, 1)/(6*(tau_max'*tau_max));
+tau_sq = (tau./(tau_max*ones(1, N0))).^2;
+tau_sum = sum(tau_sq, 1);
+
 
 ds = opti.parameter(1,N0);
 grid_control = opti.parameter(1,N0); % grid_control is either 0 or 1
@@ -96,8 +102,7 @@ opti.minimize(E);
 % See 'Time-Optimal Control of Robotic Manipulators Along Specified Paths'
 % for a clear explanation
 for i = 1:N0
-    Hb = regr(q_op(:, i),dq_op(:, i)*sqrt(b(i)),ddq_op(:, i)*b(i)+dq_op(:, i)*a(i),Sign);
-    HbTh = Hb*Theta;
+    HbTh = f_hbth(q_op(:, i),dq_op(:, i)*sqrt(b(i)),ddq_op(:, i)*b(i)+dq_op(:, i)*a(i));
     opti.subject_to(tau(:, i) == HbTh);
 end
 % dynamic constraints -
@@ -112,7 +117,9 @@ end
 % is regenerated again and again (which is very likely to happen), we will
 % eventually get a path that is not feasible even at the beginning.
 for i = 1:N0
-    opti.subject_to(-tau_max<=tau(:,i)<=tau_max); % torque is limited
+    for j = 1:6
+        opti.subject_to(-tau_max(j)<=tau(j,i)<=tau_max(j)); % torque is limited
+    end
 end
 
 
@@ -125,6 +132,7 @@ opti.subject_to(b>=0);
 % Warm start
 opti.set_initial(b, b_opt);
 opti.set_initial(a, a_opt);
+opti.set_initial(tau, tau_opt);
 
 % Duration constraint
 opti.subject_to(T <= T_remain);
@@ -134,13 +142,23 @@ opti.solver('ipopt');
 
 %% Optimization problem to find si
 q_now = zeros(6,1);
-c1= dq_pre + 2*q_now - 2*q_itc;
-c2 = 3*q_itc - 3*q_now - 2*dq_pre;
-c3 = dq_pre;
-c4 = q_now;
-qs = @(s) c1*s.^3 + c2*s.^2 + c3*s + c4;
-dqs = @(s) 3*c1*s.^2 + 2*c2*s + c3;
-ddqs = @(s) 6*c1*s + 2*c2;
+% c1= dq_pre + 2*q_now - 2*q_itc;
+% c2 = 3*q_itc - 3*q_now - 2*dq_pre;
+% c3 = dq_pre;
+% c4 = q_now;
+% qs = @(s) c1*s.^3 + c2*s.^2 + c3*s + c4;
+% dqs = @(s) 3*c1*s.^2 + 2*c2*s + c3;
+% ddqs = @(s) 6*c1*s + 2*c2;
+c1 = q_itc - q_now;
+c2 = 100;
+sx = casadi.SX.sym('sx', 1, 1);
+geo_path = 2/(1+exp(-c2*(sx-1)));
+qs = casadi.Function('qs', {sx}, {geo_path});
+dqs = casadi.gradient(qs, sx);
+ddqs = casadi.gradient(dqs, sx);
+qs = c1*qs + q_now;
+dqs = c1*dqs;
+ddqs = c1*ddqs;
 
 optis = casadi.Opti();
 q_meas = optis.parameter(6,1);
@@ -216,10 +234,9 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
 %     end
     
     gcp = ones(1,N0);
-    if flag_Nchange == 1
-        % We have to control the grid that matters
-        gcp(1, N:end) = 0;
-    end
+%     if flag_Nchange == 1
+%         gcp(1, N:end) = 0;
+%     end
     
     opti.set_value(grid_control, gcp);
     opti.set_value(q_op, qh);
@@ -239,6 +256,7 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     bk_inv_opt = sol.value(bk_inv);
     b_opt = sol.value(b);
     a_opt = sol.value(a);
+    tau_opt = sol.value(tau);
     dt = ds_k.*bk_inv_opt;
     q_ref_k= qs(si+ds_k(1));
     dq_ref_k = dqs(si+ds_k(1))*sqrt(b_opt(2));
@@ -257,12 +275,12 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     
     % Integral state
     nu = zeros(6,1);
+    slope_b = (b_opt(2) - b_opt(1))/ds_k(1);
     for i = 1:number_of_execution
         % q, dq, ddq
         q_inter = x_inter(1:6,i);
         dq_inter = dqs(si);
         ddq_inter = ddqs(si);
-        slope_b = (b_opt(2) - b_opt(1))/ds_k(1);
         b_inter = slope_b*( si - s(1) ) + b_opt(1);% b is piecewise linear
         % reference
         ds_inter = Ts*Ts*slope_b/4 + Ts*sqrt(b_inter);
@@ -277,7 +295,7 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
 %         c_inter = temp_m*ddq_inter + temp_c*dq_inter;
 %         g_inter = temp_g + f_fc*sign(dq_inter);
         % get tau
-        u = regr(q_inter,dq_inter*sqrt(b_inter),ddq_inter*b_inter+dq_inter*a_opt(1),Sign)*Theta;
+        u = f_hbth(q_inter,dq_inter*sqrt(b_inter),ddq_inter*b_inter+dq_inter*a_opt(1));
 %         u = m_inter*a_opt(1) + c_inter*b_inter + g_inter;
         % Integrate
 %         
@@ -304,9 +322,8 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     end
     x(:,k+1) = x_inter(:,end);
     
-    b_init_k = (b_opt(2) - b_opt(1))/ds_k(1)*(si - s(1)) + b_opt(1);
-    dq_pre_k = x(7:12,k+1)/sqrt(b_init_k);
-    dq_pre = dq_pre_k;
+    b_init_k = slope_b*(si - s(1)) + b_opt(1);
+    dq_pre = x(7:12,k+1)/sqrt(b_init_k);
     
     t(k+1) = t(k) + number_of_execution*Ts;
     T_itc = T_itc - number_of_execution*Ts;

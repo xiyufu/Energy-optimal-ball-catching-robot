@@ -1,24 +1,41 @@
-% TODO:
-% The maximum torque in manual is not enough for gravity compensation...
-% Something wrong with the DAE solver, just like in test.m. Need to check
-% the jacobian
 
 import casadi.*
 
 NMAX = 100;
-N0 = 20;
+N0 = 15;
 
+% Solving the optimization problem of a,b,tau is fast
+% But solving the optimization problem of si for every sample period is too
+% much of work. Might have to reduce fs (below the robot's fs)
 fs = 250;
 Ts = 1/fs;
-% The interception is hard coded here.
-% q_itc = pi/6*ones(6,1); % 'Singular point' before reaching this point
-q_itc = pi/10*ones(6,1); % No 'Singular point'
-T_itc = 2;
-tau_max = 50;
-% [0.633104; 0.552033; 0.324992; 0.146561; 0.128488; 0.200659]; % Nm, from gear side
+
+% Joint Range
+joint_range = [-165, 165;...
+               -110, 110;...
+               -110, 70;...
+               -160, 160;...
+               -120, 120;...
+               -400, 400];
+% q_itc = joint_range(:, 1) + (joint_range(:,2) - joint_range(:, 1)).*rand(6,1);
+% q_itc = q_itc*pi/180;
+% while max(abs(q_itc)) > pi % make sure q is within the range of [-pi, pi]
+%     qindex = (abs(q_itc) > pi);
+%     q_itc(qindex) = q_itc(qindex) - sign(q_itc(qindex))*pi;
+% end
+[test_traj, tc, idx] = ball_traj_gen([2;0;0], [-1;0;9], [0.512;0;0.63], 0.01, 3);
+q_itc = end_configuration(test_traj(:,idx), irb120);
+q_itc = q_itc';
+T_itc = tc;
+% Max gear torque
+tg_max = [0.633; 0.552; 0.325; 0.146; 0.128; 0.201];
+% transmission ratio
+trans_ratio = [121; 121; 101; 50; 51; 50];
+% Max joint torque
+tau_max = tg_max.*trans_ratio;
 
 %% System dynamics
-[f_m, f_c, f_g, f_fv, f_fc, solver, Sign] = dyn_pid_init(Ts);
+[f_m, f_c, f_g, f_fv, f_fc, solver, Sign, f_hb] = dyn_pid_init(Ts);
 
 %% Initializing
 x = zeros(12,NMAX+1); % actual states of the robot
@@ -31,7 +48,8 @@ q_ref = zeros(6,NMAX+1);
 dq_ref = zeros(6, NMAX+1);
 a_opt = ones(1, N0);
 b_opt = ones(1, N0+1);
-err_init = abs(x(1:6,1) - q_itc);
+tau_opt = ones(6, N0);
+% err_init = abs(x(1:6,1) - q_itc);
 err = zeros(1,NMAX);
 % nr should be an odd number so that ceil(s) and floor(s) won't give the
 % same value;
@@ -78,8 +96,8 @@ g = opti.parameter(6, N0);
 bk = ( (b(2:end)).^0.5 + (b(1:end-1)).^0.5 )/2 ;
 bk_inv = 1./bk; % Numerical approximation of 1/sqrt(b)
 
-tau_sq = tau.^2;
-tau_sum = sum(tau_sq, 1)/(6*(tau_max'*tau_max));
+tau_sq = (tau./(tau_max*ones(1, N0))).^2;
+tau_sum = sum(tau_sq, 1);
 
 ds = opti.parameter(1,N0);
 grid_control = opti.parameter(1,N0); % grid_control is either 0 or 1
@@ -105,7 +123,9 @@ end
 % is regenerated again and again (which is very likely to happen), we will
 % eventually get a path that is not feasible even at the beginning.
 for i = 1:N0
-    opti.subject_to(-tau_max<=tau(:,i)<=tau_max); % torque is limited
+    for j = 1:6
+        opti.subject_to(-tau_max(j)<=tau(j,i)<=tau_max(j)); % torque is limited
+    end
 end
 
 
@@ -118,6 +138,7 @@ opti.subject_to(b>=0);
 % Warm start
 opti.set_initial(b, b_opt);
 opti.set_initial(a, a_opt);
+opti.set_initial(tau, tau_opt);
 
 % Duration constraint
 opti.subject_to(T <= T_remain);
@@ -137,14 +158,17 @@ ddqs = @(s) 6*c1*s + 2*c2;
 
 optis = casadi.Opti();
 q_meas = optis.parameter(6,1);
+dq_meas = optis.parameter(6,1);
 si_old = optis.parameter(1,1);
 si_new = optis.variable(1,1);
-e_s = (qs(si_new) - q_meas)'*(qs(si_new) - q_meas);
-optis.minimize(e_s);
+ep_s = (qs(si_new) - q_meas)'*(qs(si_new) - q_meas);
+ev_s = (dqs(si_new) - dq_meas)'*(dqs(si_new) - dq_meas);
+optis.minimize(ep_s+1e-6*ev_s);
 optis.subject_to(si_new <= si_old+0.1);
 optis.subject_to(si_new >= si_old-0.1);
 optis.solver('ipopt');
-
+% From experience, if the robot would move, there was something wrong with
+% finding si.
 
 
 %% Start running
@@ -155,11 +179,12 @@ temp_m = zeros(6, 6);
 temp_c = zeros(6, 6);
 temp_g = zeros(6, 1);
 % nu = zeros(6,1);
-while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
+% while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
+while counter < NMAX
     
-    if counter > NMAX
-        break
-    end
+%     if counter > NMAX
+%         break
+%     end
     
     err(k) = norm(x(1:6,k) - q_itc);
     if (err(k)<1e-2) && (err(k)>err(k-1))
@@ -211,7 +236,7 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
         
         m_k(:, i) = temp_m*dqh(:, i);
         c_k(:, i) = temp_m*ddqh(:, i) + temp_c*dqh(:,i);
-        g_k(:, i) = temp_g + f_fc*sign(dqh(:, i));
+        g_k(:, i) = temp_g + f_fc*Sign(dqh(:, i));
     end
     
     gcp = ones(1,N0);
@@ -238,6 +263,7 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     bk_inv_opt = sol.value(bk_inv);
     b_opt = sol.value(b);
     a_opt = sol.value(a);
+    tau_opt = sol.value(tau);
     dt = ds_k.*bk_inv_opt;
     q_ref_k= qs(si+ds_k(1));
     dq_ref_k = dqs(si+ds_k(1))*sqrt(b_opt(2));
@@ -257,12 +283,13 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     % Integral state
     nu = zeros(6,1);
     for i = 1:number_of_execution
-        % q, dq, ddq
-        q_inter = x_inter(1:6,i);
-        dq_inter = dqs(si);
-        ddq_inter = ddqs(si);
         slope_b = (b_opt(2) - b_opt(1))/ds_k(1);
         b_inter = slope_b*( si - s(1) ) + b_opt(1);% b is piecewise linear
+        % q, dq, ddq
+        q_inter = x_inter(1:6,i);
+%         dq_inter = dqs(si);
+        dq_inter = x_inter(7:12,i)/sqrt(b_inter);
+        ddq_inter = ddqs(si);        
         % reference
         ds_inter = Ts*Ts*slope_b/4 + Ts*sqrt(b_inter);
         b_inter_next = slope_b*ds_inter + b_inter;
@@ -274,30 +301,38 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
         temp_g = full( f_g(q_inter, [0;0;0;0;0;0], [0;0;0;0;0;0]) );
         m_inter = temp_m*dq_inter;
         c_inter = temp_m*ddq_inter + temp_c*dq_inter;
-        g_inter = temp_g + f_fc*sign(dq_inter);
+        g_inter = temp_g + f_fc*Sign(dq_inter);
         % get tau
         u = m_inter*a_opt(1) + c_inter*b_inter + g_inter;
         % Integrate
-%         
-%         dq_ref_inter = zeros(6,1);
-%         
-        out = solver('x0',[x_inter(:, i);nu],'p',[u;q_ref_inter;dq_ref_inter]);          
+%         scale_big = blkdiag(scale,scale,eye(6));
+%         out = solver('x0',scale_big\[x_inter(:, i);nu],'p',[u;q_ref_inter;dq_ref_inter]);          
+%         temp_state = scale_big*full(out.xf);
+        try
+            out = solver('x0',[x_inter(:, i);nu],'p',[u;q_ref_inter;dq_ref_inter]);          
+        catch
+            q_bad = x_inter(1:6,i);
+            warning('IDAS failed');
+            flag_integratorF = 1;
+            break;
+        end
         temp_state = full(out.xf);
         x_inter(:, i+1) = temp_state(1:12);
         nu = temp_state(13:end);
         % update si
         optis.set_value(si_old, si);
         optis.set_value(q_meas, x_inter(1:6, i+1));
+        optis.set_value(dq_meas, x_inter(7:12, i+1)/sqrt(b_inter_next));
         sol_s = optis.solve();
         si = sol_s.value(si_new);
         
     end
     
     if flag_integratorF == 1
-        for ii = 1:i-1
-            x(:,k+ii) = x_inter(:, ii+1);
-            t(k+ii) = t(k+ii-1) + Ts;
-        end
+%         for ii = 1:i-1
+%             x(:,k+ii) = x_inter(:, ii+1);
+%             t(k+ii) = t(k+ii-1) + Ts;
+%         end
         break
     end
     x(:,k+1) = x_inter(:,end);
@@ -318,15 +353,43 @@ while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
     ei(:, k) = q_ref(:, k) - x(1:6, k);
     % Let's disable the precision check for now
     q_now = x(1:6,k+1);
+    dq_now = x(7:12, k+1);
     %     if q_ref_k(1) > 1/k || q_ref_k(2) > 1/k
     %         flag_precise = 0;
     %     end
 
-    if si >= 1-1/nr
+    if si >= 1-1/1000
         break
     end
     
     k = k + 1;
 end
 
+% Termination
+dt_sum = 0;
+u_sum = zeros(6,1);
+n_sum = 0;
+dt_total = sum(dt(2:end));
+nu = zeros(6,1);
+for i = 2:N
+    dt_sum = dt_sum + dt(i);
+    u_sum = u_sum + tau_opt(:,i);
+    n_sum = n_sum + 1;
+    if dt_sum >= Ts
+        u_sum = u_sum/n_sum;
+        q_ref_inter = (q_itc - q_now)*(i-1)/(N-1) + q_now; %note this q_now doesn't change
+        dq_ref_inter = (0 - dq_now)*(i-1)/(N-1) + dq_now;
+        out = solver('x0',[x(:, k);nu],'p',[u_sum;q_ref_inter;dq_ref_inter]);
+        temp_state = full( out.xf );
+        x(:,k+1) = temp_state(1:12);
+        t(k+1) = t(k) + Ts;
+        k = k+1;
+        q_ref(:,k) = q_ref_inter;
+        dq_ref(:, k) = dq_ref_inter;
+        u_sum = 0;
+        n_sum = 0;
+        dt_sum = 0;
+    end
+end
+%% Show the results
 arm_plot;

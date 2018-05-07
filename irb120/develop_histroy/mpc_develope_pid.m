@@ -157,12 +157,23 @@ dqs = @(s) 3*c1*s.^2 + 2*c2*s + c3;
 ddqs = @(s) 6*c1*s + 2*c2;
 
 optis = casadi.Opti();
+
 q_meas = optis.parameter(6,1);
 dq_meas = optis.parameter(6,1);
 si_old = optis.parameter(1,1);
+
+c0op = optis.parameter(6,1);
+c1op = optis.parameter(6,1);
+c2op = optis.parameter(6,1);
+c3op = optis.parameter(6,1);
+c4op = optis.parameter(6,1);
+
 si_new = optis.variable(1,1);
-ep_s = (qs(si_new) - q_meas)'*(qs(si_new) - q_meas);
-ev_s = (dqs(si_new) - dq_meas)'*(dqs(si_new) - dq_meas);
+q_try = c0op*si_new^4+c1op*si_new^3+c2op*si_new^2+c3op*si_new+c4op;
+dq_try = 4*c0op*si_new*3+3*c1op*si_new^2+2*c2op*si_new+c3op;
+
+ep_s = (q_try - q_meas)'*(q_try - q_meas);
+ev_s = (dq_try - dq_meas)'*(dq_try - dq_meas);
 optis.minimize(ep_s+1e-6*ev_s);
 optis.subject_to(si_new <= si_old+0.1);
 optis.subject_to(si_new >= si_old-0.1);
@@ -178,30 +189,33 @@ ddqh = zeros(6, N0);
 temp_m = zeros(6, 6);
 temp_c = zeros(6, 6);
 temp_g = zeros(6, 1);
-% nu = zeros(6,1);
-% while k < 3 || norm(x(:, k) - x(:,k-1))>1e-6
-while counter < NMAX
+
+q_now = x(1:6,k);
+
+c0 = zeros(6,1);
+c1= dq_pre + 2*q_now - 2*q_itc;
+c2 = 3*q_itc - 3*q_now - 2*dq_pre;
+c3 = dq_pre;
+c4 = q_now;
+
+while k < NMAX
     
 %     if counter > NMAX
 %         break
 %     end
     
-    err(k) = norm(x(1:6,k) - q_itc);
-    if (err(k)<1e-2) && (err(k)>err(k-1))
-        break
-    end
+%     err(k) = norm(x(1:6,k) - q_itc);
+%     if (err(k)<1e-2) && (err(k)>err(k-1))
+%         break
+%     end
     
     %% Solve the optimization problem
-    if flag_precise ~= 1
+    if flag_precise ~= 1 || flag_init == 1
         % first step or imprecise execution, regenerate path and s
         s = linspace(0,1,N0+1);
         si = 0;
-        q_now = x(1:6,k);
+        q_now = x(1:6, k);
         
-        c1= dq_pre + 2*q_now - 2*q_itc;
-        c2 = 3*q_itc - 3*q_now - 2*dq_pre;
-        c3 = dq_pre;
-        c4 = q_now; 
         qs = @(s) c1*s.^3 + c2*s.^2 + c3*s + c4;
         dqs = @(s) 3*c1*s.^2 + 2*c2*s + c3;
         ddqs = @(s) 6*c1*s + 2*c2;
@@ -255,8 +269,6 @@ while counter < NMAX
     
     % solve NLP
     sol = opti.solve();   % actual solve
-    
-    counter = counter + 1;
     
     %% Post-processing
     % retrieving variables

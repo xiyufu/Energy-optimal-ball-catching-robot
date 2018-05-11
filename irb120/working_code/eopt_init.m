@@ -58,7 +58,7 @@ nr = 999; % nr is defined for discrete path, we are not using it
 flag_precise = 1; % if our execution is finished precisely = 1 otherwise = 0
 flag_init = 1; % if it's the first run = 1 otherwise = 0
 flag_Nchange = 0; % This is for Filip's algorithm, it's not really working. Not used
-imprecise_counter = 0; % How many times is our execution imprecise
+imprecise_counter = 0; % How many times does our end pose change
 ei = zeros(6,NMAX); % error between q_ref(k) and x(1:6,k)
 si_int = 0; % for discrete path, not used here
 flag_integratorF = 0; % test only

@@ -5,21 +5,51 @@ opti_formulation; % Formulate optimization problems in casadi
 [f_m, f_c, f_g, f_fv, f_fc, solver, Sign, f_hb] = dyn_pid_init(Ts); % dynamic model
 q_itc_track = zeros(6, NMAX); % check how q_itc changes
 k = 1;
+
+% % %%%%%%%%%%%%%%%%%%%%
+% % Joint Range
+% joint_range = [-165, 165;...
+%                -110, 110;...
+%                -110, 70;...
+%                -160, 160;...
+%                -120, 120;...
+%                -400, 400];
+% q_itc = joint_range(:, 1) + (joint_range(:,2) - joint_range(:, 1)).*rand(6,1);
+% q_itc = q_itc*pi/180;
+% while max(abs(q_itc)) > pi % make sure q is within the range of [-pi, pi]
+%     qindex = (abs(q_itc) > pi);
+%     q_itc(qindex) = q_itc(qindex) - sign(q_itc(qindex))*pi;
+% end
+% T_itc = 0.5 + 0.1*rand(1,1);
+% % %%%%%%%%%%%%%%%%%%%%%
+q_itc = [-1.5610;1.5871;-1.4412;1.8197;0.1606;0.6442];
+T_itc = 0.54;
 while k < NMAX
+    
+%     % %%%%%%%%%%%%%%%%%%%%
+%     if k == 2
+%         error('feasible');
+%     end
+%     %   %%%%%%%%%%%%%%%%%%%
     q_now = x(1:6, k);
     dq_now = x(7:12, k);
     % ball trajectory estimation
-    sigma = 0.05/k;
-    ball_init_pos = [2;0;0];% + sigma*rand(3,1);
-    ball_init_vel = [-1;0;9];% + sigma*rand(3,1);
-    ee_init_pos = [0.512;0;0.63];
-    [test_traj, tc, idx] = ball_traj_gen(ball_init_pos, ball_init_vel, ee_init_pos, 0.005, 3);
-    
-    % catch-point determination & inverse kinematics
-    q_itc = end_configuration(test_traj(:,idx), irb120);
-    q_itc = q_itc';
-    q_itc_track(:,k) = q_itc;
-    T_itc = tc;
+%     sigma = 0.05/k;
+%     % ball_init_pos = [2;0;0];% + sigma*rand(3,1);
+%     % ball_init_vel = [-1;0;9];% + sigma*rand(3,1);
+%     % ball_init_vel = [-3.15;0;2.86];
+%     ee_init_pos = [0.512;0;0.63];
+%     [test_traj, tc, idx] = ball_traj_gen(ball_init_pos, ball_init_vel, ee_init_pos, 0.005, 3);
+%     
+%     % catch-point determination & inverse kinematics
+%     q_itc = end_configuration(test_traj(:,idx), irb120);
+%     if isempty(q_itc)
+%         error('The ball will not go inside the workspace');
+%     end
+%     q_itc = q_itc';
+%     q_itc_track(:,k) = q_itc;
+%     T_itc = tc;
+
     if k == 1
         q_itc_old = q_itc;
     end
@@ -88,7 +118,6 @@ while k < NMAX
         c_k(:, i) = temp_m*ddqh(:, i) + temp_c*dqh(:,i);
         g_k(:, i) = temp_g + f_fc*Sign(dqh(:, i));
     end
-    
     % feed data to the solver
     gcp = ones(1,N0);
     if flag_Nchange == 1 % for Filip's algorithm, not used
@@ -113,8 +142,23 @@ while k < NMAX
     q_ref_k= qs(si+ds_k(1));
     dq_ref_k = dqs(si+ds_k(1))*sqrt(b_opt(2));
     
+    % %%%%%%%test
+    if k == 1
+        dt_ref = zeros(1,NMAX);
+        m_init = m_k(:, 1);
+        c_init = c_k(:, 1);
+        g_init = g_k(:, 1);
+        a_opt_init = a_opt;
+        b_opt_init = b_opt;
+        tau_opt_init = tau_opt;
+        E_init = sol.value(E);
+        t_begining = sol.value(T);
+    end
+    dt_ref(k) = dt(1);
+    % %%%%%%%%%end test
+    
     % Send data to robot (simulation)
-    number_of_execution = round(dt(1)/Ts);
+    number_of_execution = floor(dt(1)/Ts);
     if dt(1) < Ts
         number_of_execution = 1;
     end
@@ -193,10 +237,10 @@ while k < NMAX
         warning('time out');
         break
     end
-%     q_ref(:,k+1) = q_ref_k;
-%     dq_ref(:, k+1) = dq_ref_k;
-    q_ref(:, k+1) = q_ref_inter;
-    dq_ref(:, k+1) = dq_ref_inter;
+    q_ref(:,k+1) = q_ref_k;
+    dq_ref(:, k+1) = dq_ref_k;
+%     q_ref(:, k+1) = q_ref_inter;
+%     dq_ref(:, k+1) = dq_ref_inter;
     k = k + 1;
     
     % Finished?
@@ -208,6 +252,7 @@ while k < NMAX
 end
 
 %Termination
+kt = k;
 dt_sum = 0;
 zero_vec = zeros(6,1);
 u_sum = zeros(6,1);
@@ -221,14 +266,14 @@ for i = 2:N0
     if dt_sum >= Ts || i == N0
         u_sum = u_sum/n_sum;
         q_ref_inter = (q_itc_old - q_now)*(i-1)/(N0-1) + q_now; %note this q_now doesn't change
-        dq_ref_inter = (zero_vec - dq_now)*(i-1)/(N0-1) + dq_now;
+        dq_ref_inter = (zero_vec - dq_now)*((i-1)/(N0-1))^4 + dq_now;
         out = solver('x0',[x(:, k);nu],'p',[u_sum;q_ref_inter;dq_ref_inter]);
         temp_state = full( out.xf );
         x(:,k+1) = temp_state(1:12);
         t(k+1) = t(k) + Ts;
         k = k+1;
         q_ref(:,k) = q_ref_inter;
-        dq_ref(:, k) = dq_ref_inter;
+        dq_ref(:, k) =  dq_ref_inter;
         u_sum = 0;
         n_sum = 0;
         dt_sum = 0;
